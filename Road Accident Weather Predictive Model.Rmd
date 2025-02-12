@@ -1,0 +1,584 @@
+---
+This task aims to identify relationships between weather data and road accident data in Victoria Australia South East Suburbs of Melbourne. Car accident data is from Victoria Road Crash Data at vic.gov.au. Visual Crossing weather data services (https://www.visualcrossing.com/ ) was chosen to extract weather data from. The aim of this task is to build a model to predict road accidents from weather data.
+
+Statistical methods that will be applied to generate the model are linear regression (linear model) and generalised additive model. Both methods have advantages and disadvantages which have been considered when applying them to the data in this model.
+
+Linear modelling is advantageous in the it is simple to carry out and results in a function that is easy to understand and apply to new data. Linear modelling is appropriate for modelling count data, the same type as the number of car accidents is. This means that the model will be easy for potential users to understand and apply. Linear models work best when data has low dimensionality (Rout, 2023), as the data in this assessment task is. The disadvantage of a linear model is that any outliers in a dataset have a large impact on the result of the regression, as regression is calculated using a mean value (Rout, 2023). As the dataset has not outliers there is not disadvantage in this case. The only main disadvantage is that a linear relationship between the variables is assumed (Vaidya, 2023), which is not clear in the case of this data at the outset. This means that is the relationship is not linear; the model will not be appropriate for predicting car accident numbers.
+
+Generalised additive model (GAM) is advantageous in that data is not assumed to have a linear relationship from the beginning (Vaidya, 2023). As the relationship between the data is unknown at the outset this means that if there is a non-linear relationship between car accidents and EHF, the number of car accidents could be predicted from a model using information found about the relationship between variables using GAM. While the distribution is not assumed to be linear using a GAM, it is assumed that distribution comes from the exponential family (Ellis, 2022). As there are many common distributions in this family this gives more probability that a good fitting distribution can be found. As linear models are simplistic, they can be prone to overfitting. Generalised additive models use regularises to prevent overfitting of data (Ellis, 2022). The smoothing functions in GAMs allow for relationships that are non-linear and non-monotonic to be realised, allowing complex relationships between predictor and response variables to be better understood (Vaidya, 2023).  Like linear models, generalised additive models work best with low dimensional data, as is the case in this assessment task. While working better with low dimensions, GAMs can accept multiple predictor variables, and the results of the smoothing function provides information on the direction and significance of each predictor variable on the response variable (Vaidya, 2023), hence increasing the interpretability of the results of this model.
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+install.packages("mgcv")
+```
+
+
+```{r}
+#import required libraries
+library(readr)
+library(tidyverse)
+library(ggplot2)
+library(lubridate)
+library(fitdistrplus)
+library(magrittr)
+library("plyr") 
+library("dplyr") 
+library(broom)
+library(ISLR)
+library(skimr)
+library(mgcv)
+library(zoo)
+library(RcppRoll)
+library(mosaic)
+
+```
+
+
+SOURCE WEATHER DATA
+
+## WEATHER DATASET
+
+```{r}
+# Import all csv files in this location and append by column names
+all_weather <- list.files(path = "C:/Users/alito/Documents/SIT741/Assignment2/data", 
+                      pattern = "*.csv", full.names = TRUE) %>%
+ lapply(read_csv) %>%                                          
+ bind_rows                                                      
+
+# Keep only necessary columns
+keep_data <- c("datetime","tempmax","tempmin","precip")
+weather = all_weather[keep_data]
+
+# Aggregate tempmax, tempmin and precip based on date
+weather <- (aggregate(cbind(tempmax,tempmin,precip) ~ datetime, data = weather, FUN = mean, na.rm = TRUE))
+
+# Round tempmin to 2 decimal places           
+weather$tempmin <- round(weather$tempmin, 2) 
+
+# Filter weather data to remove lockdown data
+weather <- weather %>% filter(datetime <= "2020-02-29")
+
+weather
+```
+
+
+```{r}
+# Show number of rows in dataset
+nrow(weather)
+```
+
+
+```{r}
+# Check time period of dataset
+print(min(weather$datetime))
+print(max(weather$datetime))
+```
+
+
+## ROAD TRAFFIC ACCIDENTS DATASET
+
+```{r}
+# Import dataset
+cav_data_link <- 'car_accidents_victoria.csv'
+top_row <- read_csv(cav_data_link, col_names = FALSE, n_max = 1)
+second_row <- read_csv(cav_data_link, n_max = 1)
+
+column_names <- second_row %>% 
+  unlist(., use.names=FALSE) %>% 
+  make.unique(., sep = "__") # double underscore
+
+column_names[2:5] <- str_c(column_names[2:5], '0', sep='__')
+
+daily_accidents <- 
+  read_csv(cav_data_link, skip = 2, col_names = column_names)
+
+daily_accidents
+```
+
+
+```{r}
+# Make dataset tidy: first use pivot_longer then pivot_wider
+daily_accidents_tidy <- daily_accidents %>% 
+  pivot_longer(
+    cols = !DATE,
+    names_to = c("TYPE", "LOCATION"),
+    names_sep = "__",
+    values_to = "COUNT"
+  )
+
+daily_accidents_tidy <- daily_accidents_tidy %>%  pivot_wider(
+    names_from = TYPE, 
+    values_from = COUNT
+  )
+```
+
+```{r}
+# Convert DATE column to date type and LOCATION column to factor type
+daily_accidents_tidy <- daily_accidents_tidy %>% 
+  mutate(DATE = as.Date(DATE, format = "%d/%m/%Y"),LOCATION = factor(LOCATION))
+
+#Convert LOCATION values to words
+daily_accidents_tidy <- daily_accidents_tidy %>% 
+  mutate(LOCATION = recode(LOCATION, '0'="Eastern",'1'="Metro North West" ,'2'="Metro South East",'3'="North Eastern",'4'="Northern",'5'="South Western",'6'="Western"))
+```
+
+```{r}
+# Count NA values in total, in date and in location columns separately
+print(sum(is.na(daily_accidents_tidy)))
+print(sum(is.na(daily_accidents_tidy$DATE)))
+print(sum(is.na(daily_accidents_tidy$LOCATION)))
+
+#check mean of each column
+colMeans(daily_accidents_tidy[c(3,4,5,6)], na.rm=TRUE)
+
+#Convert NA values to floor of mean value
+daily_accidents_tidy$FATAL[is.na(daily_accidents_tidy$FATAL)] <- floor(mean(daily_accidents_tidy$FATAL, na.rm=TRUE))
+daily_accidents_tidy$SERIOUS[is.na(daily_accidents_tidy$SERIOUS)] <- floor(mean(daily_accidents_tidy$SERIOUS, na.rm=TRUE))
+daily_accidents_tidy$NOINJURY[is.na(daily_accidents_tidy$NOINJURY)] <- floor(mean(daily_accidents_tidy$NOINJURY, na.rm=TRUE))
+daily_accidents_tidy$OTHER[is.na(daily_accidents_tidy$OTHER)] <- floor(mean(daily_accidents_tidy$OTHER, na.rm=TRUE))
+
+#Check there are now no NA values
+print(sum(is.na(daily_accidents_tidy)))
+```
+
+```{r}
+#select data from Metropolitan South East Region
+mse <- daily_accidents_tidy %>% 
+  filter(LOCATION == 'Metro South East')
+```
+
+```{r}
+# Add TOTAL_ACCIDENTS column with sum total of accidents on each day
+mse <- mse %>% mutate(TOTAL_ACCIDENTS = rowSums(mse[3:6]))
+
+#drop the unrequired dates
+mse <- mse %>% filter(between(DATE, as.Date('2016-03-01'), as.Date('2020-02-29')))
+
+# Transform DATE data into Time variable, a count of the number of days from Jan 1st 1970
+# Divide by 10000 to stop large values causing instability in the modelling
+mse <- transform(mse, TIME = as.numeric(DATE) / 10000)
+
+mse
+```
+
+
+
+## LINEAR PREDICTION
+
+```{r}
+# Fit a linear model for y using the date as predictor variable
+lmfit <- lm(TOTAL_ACCIDENTS ~ TIME, data = mse)
+
+# Collate the results in a table
+(
+lmresults <- lmfit %>% 
+  augment
+)
+
+# Create tibble with datasource column a categorical column of fitted or actual, 
+# and count storing the result of the total car accidents for each day
+colnames(lmresults)[1] =".actual"
+comparison <- lmresults %>% 
+  gather(key = "datasource", 
+         value = "count", 
+         1,3)
+comparison
+
+# Plot fitted values and actual values as line graphs
+ggplot(comparison, aes(x = TIME, y = count, col = datasource)) + 
+  geom_line()
+
+# QQ Plot of residuals - check for normality of residuals
+lmresults %>% 
+  ggplot(aes(sample = .std.resid)) +
+  geom_qq() +  
+  geom_qq_line(col = 'steelblue')
+
+# Plot fitted values against residuals - check for variance and independence of residuals
+lmresults %>% 
+  ggplot(aes(x = .fitted, y = .resid)) +
+  geom_point() + 
+  geom_quantile() +
+  geom_smooth(colour = 'firebrick') 
+
+lmresults %>% 
+  ggplot(aes(x = TIME, y = .resid)) +
+  geom_point() + 
+  geom_quantile() +
+  geom_smooth(colour = 'firebrick')
+
+# Assess model fit with summary results
+lmfit %>% 
+  summary
+```
+
+
+Linear Model Analysis
+
+The linear model is not a perfect way to model the trend of y. as evidenced by the fitting of the predicted values against the actual values in Plot 1, the linear model does not account for any variation in the data, instead suggesting that the total number of accidents is around 15 each day, with some reduction in more recent time. The residual plots from the linear model can be used to check the model assumptions are met, thus assisting to decide if the model is appropriate for the dataset. As the assumptions have not been met, a linear model may not be the most appropriate for this dataset.
+
+Plot 2 is used to check for normality of residuals. If residuals are normally distributed, they will fit along the blue plotted line. There is a pattern of residual at values less than 2 and greater than 2 not fitting directly onto the blue expected values line. As some residuals are not adhering to the expected values, it means that the assumption of normality of residuals is not met, and a linear model may not be the best model to use for the dataset. 
+
+Plot 3 is used to check for equal variance of residuals. If residuals have equal variance, they should be distributed randomly around the 0 on the horizontal axis. As there is a pattern of residuals been higher than the expected 0 when fitted is less then 14and greater than 14.8 and a pattern of residuals been lower than 0 between fitter 14 and 14.5, residuals are not in an evenly spread horizonal area around the zero variance. This means that the residuals do not have equal variance, so again a linear model may not be appropriate for this dataset.
+
+Plot 4 is used to check the assumption of linearity. If there is a linear relationship between the variables of time and number of car accidents, then the residuals of the linear model should be distributed evenly on the horizontal axis around the value of 0. As there is a pattern that residuals seem higher on the 2016 and 2022 time periods and lower at the time of 2018, it appears there is a non-random pattern present in the residuals when graphed against the predictor variable of time. This means that the assumption of linearity is not met and that the linear model may not be best model to use for this data set.
+
+It is worth noting, however, that while the assumptions of the linear model are not perfectly met, before dismissing this model completely other models should be tested. The predictions of these other models compared to the predictions of the linear model using this dataset should then be compared, this can be done using many methods, including the Akaike information criterion (AIC). If the linear model has the best predictions comparatively, this model will may still be chosen.
+
+
+# GENERALISED ADDITIVE MODEL PREDICTION (GAM)
+
+```{r}
+# Fit a generalised additive model for y using the TIME as predictor variable
+gamfitgaussian <- gam(TOTAL_ACCIDENTS ~ TIME, data=mse) 
+gamfitgaussian
+
+gamfitgamma <- gam(TOTAL_ACCIDENTS ~ TIME, 
+           family=Gamma(link=inverse), 
+           data=mse)
+gamfitgamma
+
+gamfitpoisson <- gam(TOTAL_ACCIDENTS ~ TIME, 
+           family=poisson(link=log), 
+           data=mse)
+gamfitpoisson
+
+gamfitnegbi <- gam(TOTAL_ACCIDENTS ~ TIME, 
+           family=nb(theta=NULL,link=sqrt), 
+           data=mse)
+gamfitnegbi
+
+# Report summary
+summary(gamfitgaussian)
+summary(gamfitgamma)
+summary(gamfitpoisson)
+summary(gamfitnegbi)
+
+# Compare AIC to find best fitting GAM model
+AIC(gamfitgaussian,gamfitgamma,gamfitpoisson,gamfitnegbi)
+
+# Check residuals of best fitting GAM model
+gam.check(gamfitnegbi)
+
+# Collate the results in a table
+(
+gamresults <- gamfitnegbi %>% augment
+)
+
+# Create tibble with datasource column a categorical column of fitted or actual, 
+# and count storing the result of the total car accidents for each day
+colnames(gamresults)[1] =".actual"
+comparison <- gamresults %>% 
+  gather(key = "datasource", 
+         value = "count", 
+         1,3)
+comparison
+
+# Plot fitted values and actual values as line graphs
+ggplot(comparison, aes(x = TIME, y = count, col = datasource)) + 
+  geom_line()
+
+# Plot fitted values against residuals - check for variance and independence of residuals
+gamresults %>% 
+  ggplot(aes(x = .fitted, y = .resid)) +
+  geom_point() + 
+  geom_quantile() +
+  geom_smooth(colour = 'firebrick') 
+
+gamresults %>% 
+  ggplot(aes(x = TIME, y = .resid)) +
+  geom_point() + 
+  geom_quantile() +
+  geom_smooth(colour = 'firebrick')
+```
+
+
+Generalised Additive Model Analysis
+
+Several GAM models were compared to find a model with the best fit. GAM models were fitted with different distributions, which were determined from looking at data values. The distributions compared were gaussian with identity link function, Poisson with log link function, gamma with inverse link function and negative binomial with square root link function. Poisson was chosen as road accident numbers are counts, as was negative binomial. Gamma was chosen as all data is positive. Gaussian was included as a control. The effectiveness of distributions was compared using an AIC measurement.
+
+An AIC test was carried out to determine how well each of the models fitted comparatively. A better fitting model has a lower AIC score. The model with the lowest AIC value was built using the negative binomial distribution. The AIC test also returns the degrees of freedom (df). Lower df also results in a better model, so df is also considered when checking AIC.  The model with the lowest df was built on the Poisson distribution, however as the AIC returned from this is the highest, this model was not the more effective. The negative binomial distribution model has the same df as both the gaussian and gamma models. As it has comparable df and the lowest AIC score, the GAM model chosen to proceed in this investigation is the negative binomial with square root link function.
+
+After the GAM negative binomial was determined as the best fitting distribution using AIC, graphs and residuals were investigated only from this model. As with the linear model tested in question 2.3 above, the GLM with negative binomial distribution is not a perfect way to model the trend of y. As shown in Plot 5, predicted values were very low compared to actual data values using this model. As discussed below, there is variation in residuals in the predicted values so a GAM model with negative binomial distribution assumption may not give perfectly predicted results for response variables.
+
+Plot 6 compares the deviance of residuals to theoretical residuals if data is normally distributed in a QQ plot. If residuals are normally distributed, they will fit along the blue plotted line. Below 0 and above 2.5 the residuals from the dataset are further from the theoretical residuals, however in the centre of the dataset the residuals adhere to the expected values. Below 0 the residuals move in steps, with residuals further away from the expected values the further removed from 0. This means that the assumption of normality of residuals is not completely met, and this model may be insufficient for predicting data, particularly for small values. 
+
+Plot 7 is a histogram of the residuals. This shows that the residuals are in a roughly normal bell curve shape, however the maximum of the data is not centred on 0, instead centred just below it, and data has a slight skew to the left. As the residuals are not exactly normal, the negative binomial distribution may not be a perfect fit for this data.
+
+Plot 8 compares the position of the residuals with the position of the predicted values using the GAM with negative binomial distribution. There is always an even number of residuals plotted above and below the slightly curved predicted line area.  As the residuals are distributed evenly (aside from a few outliers), it means that applying a GAM function with a non-linear assumption is a better representation of the relationship between time and number of accidents than just the linear model that compares linear residuals of time against time in Plot 4 in section 2.3 above.
+
+Plot 9 plots the fitted values against the residuals. It shows a more even distribution of values along the 0 axis than in the linear model Plot 3 above. However, there are still values that are lower than expected around the residual value of 1.73 to 1.79.
+
+
+
+# MODEL UGMenTATION TO INCLUDE weEKDAY VARIATION
+
+```{r}
+# Add a new WEEKDAY column, with weekday as character extracted from DATE using lubridate
+mse$WEEKDAY <- wday(mse_days$DATE)
+mse
+
+gamfitnegbi_week <- gamfitnegbi %>% 
+  update( . ~ . + WEEKDAY )
+
+# Report summary
+summary(gamfitnegbi_week)
+
+# Check residuals of best fitting GAM model
+gam.check(gamfitnegbi_week)
+
+# Collate the results in a table
+(
+resultsweek <- gamfitnegbi_week %>% augment
+)
+
+
+# Create tibble with datasource column a categorical column of fitted or actual, 
+# and count storing the result of the total car accidents for each day
+colnames(resultsweek)[1] =".actual"
+comparison <- resultsweek %>% 
+  gather(key = "datasource", 
+         value = "count", 
+         1,3)
+comparison
+
+# Plot fitted values and actual values as line graphs
+ggplot(comparison, aes(x = TIME, y = count, col = datasource)) + 
+  geom_line()
+
+# Plot fitted values against residuals - check for variance and independence of residuals
+resultsweek %>% 
+  ggplot(aes(x = .fitted, y = .resid)) +
+  geom_point() + 
+  geom_quantile() +
+  geom_smooth(colour = 'firebrick') 
+
+```
+
+
+Augmented Model Analysis
+
+The GAM negative binomial distribution model was augmented to include the weekly variations. From Plot 10, like the negative binomial without weekly variation, the predictions made from this model are low. However, it is also evident that the predictions made with the weekday GAM model include the variation patterns seen in the original count of road accidents data. Comparatively to the GAM without weekday variation and the linear model this model appears to be a better fit from residual comparison. However, there is still a little variation in residuals, so the GAM model with negative binomial distribution and weekly variation may not give perfectly predicted results for response variables.
+
+Plot 11 compares the deviance of residuals to theoretical residuals if data is normally distributed in a QQ plot. The residuals are closely aligned to the expected values, however below the value of -2 and above the value of 2.5 there is more variation.  Plot 12 is a histogram of the residuals. This shows that the residuals are in a roughly normal bell curve shape, however the maximum of the data is not centred on 0, instead centred just below it, and data has a slight skew to the left. Plot 13 plots the fitted values against the residuals. It shows a more even distribution of values along the 0 axis than in the linear model Plot 3 or Plot 9 above. 
+
+
+
+# MODEL EVALUATION
+
+```{r}
+# Compare models using AIC
+AIC(lmfit,gamfitnegbi,gamfitnegbi_week)
+```
+
+Effectiveness of models can be considered using plots. Plotting predicted values against accurate values allows a visual representation of the goodness of fit for a model. It can be seen from Plot 1 that while there is very little variation in the liner predictions, the values here are higher than in the other two GAM models tested. Plot 5 of the GAM model with binomial distribution shows the predicted values much lower than those from the actual data itself. Lastly Plot 10 also shows predicted value much lower than actual values as with the binomial distribution GAM model, however variation seen in the dataset is also seen in this model by adding in the weekly data, whereas this is not seen in other models.
+
+The best fitting model is the GAM with negative binomial distribution when weekly variation is considered. This is because the AIC value is the lowest for this model. With weekly variation considered the GAM model has an AIC has a score of 8575, while without weekly variation considered it has a score of 8612. The degrees of freedom are also only increased by 1 by adding weekly variation; so, this model is better as it adds few degrees of freedom for much greater estimation. Comparatively, the linear model has the worst fit. While the linear model has an equal degree of freedom with the negative binomial GAM model without weekly variations included, it also has a higher AIC result than either of the other GAM models tested.
+
+Residuals can be analysed using the residual plots. The benefit of plots is that they offer a visual representation of results. Three of the plots discussed above can be considered when analysing residuals; histogram of residuals, QQ plot and plot of residuals vs fitted values. 
+
+Residual distribution is seen in the histograms. The histogram for residuals of the GAM with negative binomial distribution and weekly variation shows that the residuals are more normally distributed with less skew (Plot 10) when compared to the GAM without weekly variation (Plot 6), with fewer values below 3. 
+
+The QQ-plot shows how far away residuals are from expected values. The GAM model with weekly variation also has the most values that lie along the expected values line in the QQ-plot (Plot 9). There is more variation starting closer to the centre of the data in the GAM mode without weekly variation (Plot 5) and that higher and lower values have much more variance in the linear model to that predicted (Plot 2).
+
+The scatter plot of residuals and fitted values also looks at the distribution of the residuals. The least number of visible outliers in the plot of residuals vs fitted values is found in the GAM model with binomial distribution and weekly variation (Plot 11), compared to the other models’ residual patterns in Plot 3 and Plot 8.
+
+This day of the week variable does affect the fit of the model, resulting in a better AIC measurement. The GAM model with weekly variation gives a better AIC measurement than either the linear model or the GAM without consideration of weekly variation.
+
+
+
+HEATWAVES, PRECIPITATION AND ROAD TRAFFIC ACCIDENTS
+
+John Nairn and Robert Fawcett from the Australian Bureau of Meteorology have proposed a measure for the heatwave, called the excess heat factor (EHF). The excessive heat factor is calculated using two variables: Excess Heat significance Index (EHIsig) and Excess Heat acclimatisation Index (EHIaccl). These two values are calculated from daily max and min values. These daily max and daily min values are first aggregated to find their mean, which is the daily mean temperature measure (DMT).  DMT is used to calculate each of the variables required to find the excessive heat factor (EHF). 
+First the 9th percentile of DMT (T95) is found. T95 is found by locating the 95th percentile value of the DMT data over a 30-year period. This involves ordering DMT values and selecting the value that is at the 95th percentile position. In this task a 30-year period from 1985 to 2915 was used to calculate the T95 value.
+The DMT data is then used to calculates the EHIsig. EHIsig is the 3-day average DMT (for the current day and following two days) compared to the 95th percentile of DMT. This variable is a measure of how hot the 3-day period is with respect to the annual climate. The 3-day average DMT is calculated by adding the DMT for the present day and the two subsequent days then dividing this value by 3 to find the mean. The T95 value calculated previously is then subtracted from this 3-day average, resulting in the EHIsig value.
+The EHIaccl variable is a measure of how hot the3-day period is with respect to the last 30 days. This value is calculated by fist finding the 30- day average DMT for the 30 days preceding the current date. This average is calculated by summing the DMT values for 30 days prior to the date given, then dividing by 30 to find the mean. The 30-day average DMT is then subtracted from the 3-day average DMT, resulting in the EHIaccl value.
+Once the EHIaccl and the EHIsig have been calculated, the EHF can be found. First the value of the EHIaccl is checked. If EHIaccl is greater than 1, the EHIaccl is multiplied by the EHIsig to find the EHF value. If the EHIaccl is less than 1, the EHIsig value is multiplied by 1 to find the EHF (i.e. the EHF is equal to the EHIsig).
+
+
+# CALCULATE DAILY EHF VAULES FROM WEATHER DATA
+
+```{r}
+# Calculate daily mean temperature (DMT) average of daily tempmin and tempmax
+weather <- weather %>% mutate(DMT = rowMeans(weather[ ,c(2,3)]))
+
+# Change datetime column name to DATE
+colnames(weather)[1] ="DATE"
+weather
+
+# Make dataframe with dates from 1986 to 2015
+weather_old <- weather %>% filter(between(DATE, as.Date('1986-01-01'), as.Date('2015-12-31')))
+
+# Find 95th percentile of DMT
+quantile(weather_old$DMT, probs = .95)
+
+# Calculate 3 day average forward for each day
+weather <- weather %>% mutate(T_3_after = rollapply(DMT,width = 3,FUN=mean,align = "left",fill = NA,na.rm=T))
+
+# Calculate EHIsig from 3 day average and T95 (95th percentile DMT)
+weather <- weather %>% rowwise() %>% mutate(EHIsig = (weather$T_3_after - 23.452))
+#weather$EHIsig <- (weather$T_3_after - t95)
+
+# Calculate 30 day average backwards for each day
+weather <- weather %>% mutate(T_30_before = roll_meanr(lag(DMT), 30))
+
+# Calculate EHIaccl from 3 day average and 30 day average
+weather <- weather %>% rowwise() %>% mutate(EHIaccl = (weather$T_3_after - weather$T_30_before))
+
+# Get dates required for weather data (March 2016 to February 2020 inclusive)
+weather <- weather %>% filter(between(DATE, as.Date('2016-03-01'), as.Date('2020-02-29')))
+weather
+
+# Calculate daily EHF using an if_else statement
+weather <- weather %>% rowwise() %>% 
+  mutate(EHF = if_else(weather$EHIaccl>1, weather$EHIaccl*weather$EHIsig, weather$EHIsig))
+weather
+
+# Plot the daily EHF values
+plot(weather$DATE,weather$EHF)
+```
+
+
+# PREDICTIVE MODELLING USING EHF VALUES
+
+```{r}
+# Join dataframes mse and weather on DATE
+alldata = merge(x = mse, y = weather, by = "DATE",all = TRUE)
+alldata
+
+# Add column with weekday
+alldata$WEEKDAY <- wday(alldata$DATE)
+```
+
+```{r}
+# Use EHF as an additional predictor to augment linear model
+lmfit_2 <- lm(TOTAL_ACCIDENTS ~ TIME + EHF, data = alldata)
+lmfit_2 %>% summary
+```
+
+```{r}
+# Use EHF as an additional predictor to augment generalised additive model
+gamfitnegbi_2 <- gam(TOTAL_ACCIDENTS ~ TIME + EHF, 
+           family=nb(theta=NULL,link=sqrt), 
+           data=alldata)
+gamfitnegbi_2 %>% summary
+```
+
+```{r}
+# Include weekly variations in the generalised additive model
+gamfitnegbi_week_2 <- gamfitnegbi_2 %>% 
+  update( . ~ . + WEEKDAY )
+
+gamfitnegbi_week_2 %>% summary
+```
+
+
+```{r}
+# Does the extra predictor improve the model fit?
+AIC(lmfit,gamfitnegbi,gamfitnegbi_week,
+  lmfit_2,gamfitnegbi_2,gamfitnegbi_week_2)
+```
+
+
+Model Analysis with EHF
+
+The estimated effect of EHF on road accident numbers is determine by looking at P-values. The P-value must be lower than 0.05 to assume that the predictor variable does have an impact on the response variable. The linear model has time with a P-value of 0.0392, which is below the 0.05 threshold, thus EHF is likely to have a relationship with the number of car accidents when using the linear model with two variables, time, and EHF. The GAMs tested have different results for EHF P-value. The GAM without weekday consideration has a high P-value of 0.407, suggesting is predictive but not to a great extent. However, when the GAM is grouped by weekday, the P-value for EHF decreases to 0.0265. This means that when data is divided by weekday using a GAM negative binomial model, EHF is more likely to be a variable of interest that does impact the number of road traffic accidents. Thus all models show the EHF is a contributing variable to the number of road traffic accidents that occur.
+
+Both linear and GAM models were fitted with the second variable of EHF, in addition to the variable of time (used in these models as a numerical value of date value). The AIC score for the linear model with one variable is 8637, while with two variables it is reduced to 8433 while adding only one degree of freedom.  The AIC score for the GAM model with negative binomial distribution also reduces, from 8612 to 8411, also while adding just one degree of freedom. The AIC for the GAM model with weekly variation added also exhibits improved AIC score, reducing from 8576 to 8374 while adding one degree of freedom. As is evident from the AIC measurement reduction in every model tested, including a second variable of EHF improves the model fit.
+
+When modelling with one variable, time, it is evident for P-values in all models in Section 3 (the single variable models) that time is a significant variable in the estimation of the number of car accidents. However, when the EHF variable is also included the variable of time becomes insignificant in every model, with a P-value over the significance threshold of 0.05. 
+
+From the two-variable modelling, it is evident that EHF is a variable of interest which effects the number of road traffic accidents that occur. When time data is further divided by weekday, the effect of the EHF becomes stronger, reducing the P-value for the EHF.
+
+From the decreasing AIC results when a second variable is added, it is evident that including the second predictor of EHF improved the accuracy of the model. These results show that while EHF may not be a strong predictor of the number of car accidents by itself (as the P-values are close to 0.05), it is a variable of interest which is likely to have some impact on the variation in the total number of road accidents in the dataset.
+
+Of note, when the model takes into consideration the variation in the data caused by weekday (GAM group by date models), the day of the week is the most significant predictor variable. The P-value for the weekday variable is well below the P-value threshold of 0.05, suggesting it is the strongest predictive variable of those investigated thus far.
+
+According to research here EHF is a predictor of the number of road traffic accidents. This is because the P-values are below the significance level of 0.05 (but not by much), which indicate there is a weak relationship between the variable of EHF and accidents. However, when date data is further divided into weekday categories, the significance of EHF is increased (as the reported P-value decreases), suggesting that EHF has more impact when variation due to the day of the week is also accounted for.
+
+Rolison et al’s 2018 research states that the most frequent factors reported in road accidents are driver carelessness, lack of control, slippery roads, travelling too fast for conditions, inexperienced drivers, and speeding. This research does not state heat as a reported factor in road accidents. However, the human physiological response to heatwaves is vasodilatation to increase skin temperature and profuse sweating to reduce body heat storage and long-term action of these physiological responses fatigues the body’s system and can result in mental confusion and behavioural changes (Parsons, 2009). This mental confusion and behavioural changes could cause an increase in human error when driving, leading to accidents cause by driver carelessness, lack of control and travelling at unsafe speeds as identified as the major causes of accidents. This suggests that there may be a possible relationship between EHF and road accident numbers, but as a contributing variable to other factors.
+
+While most of the frequent factors involve human error, from the research by Rolison et al (2018) there is one significant weather feature measure that may be useful to predict road traffic accidents, which is precipitation. Precipitation causes slippery roads, which is one of the top six reported reasons for road accidents in the Rolison et al (2018) paper. 
+
+
+# ADDITIONAL WEATHER FEATURES
+
+```{r}
+# Incorporate additional weather feature into linear model
+lmfit_3 <- lm(TOTAL_ACCIDENTS ~ TIME + EHF + precip, data = alldata)
+lmfit_3 %>% summary
+```
+
+
+```{r}
+# Incorporate additional weather feature into generalised additive model
+gamfitnegbi_3 <- gam(TOTAL_ACCIDENTS ~ TIME + EHF + precip, 
+           family=nb(theta=NULL,link=sqrt), 
+           data=alldata)
+gamfitnegbi_3 %>% summary
+```
+
+```{r}
+# Include weekly variations in the generalised additive model
+gamfitnegbi_week_3 <- gamfitnegbi_3 %>% 
+  update( . ~ . + WEEKDAY )
+
+gamfitnegbi_week_3 %>% summary
+```
+
+
+```{r}
+# Does additional feature improve model? Use AIC to prove your point
+AIC(lmfit,gamfitnegbi,gamfitnegbi_week,
+  lmfit_2,gamfitnegbi_2,gamfitnegbi_week_2,
+  lmfit_3,gamfitnegbi_3,gamfitnegbi_week_3)
+```
+
+
+Models with Additional Features Analysis
+
+Both linear and GAM models were fitted with the third variable of precipitation, in addition to the time (used in these models as a numerical value of date value) and EHF variables which had been included in the models previously. The improvement to these models by adding precipitation can be determined based on AIC and P-values.
+
+In the summary of both the linear and both GAM models used, the P-value of precipitation is much lower than the level of significance. In the linear model P-value is 0.00125, in the GAM model without weekday consideration P-value is similar at 0.00123 and GAM model with weekly variation has a P-value of 0.0019. This means that it is likely that variation in the number of car accidents does have a relationship to the precipitation measurement.
+
+Also as is evident from the AIC measurement, including the precipitation variable improves the model as the AIC score is reduced by adding the third variable of precipitation for both the linear and GAM models. For the linear model, adding the precipitation variable decreased the AIC to 8425 from 8433 while adding only one degree of freedom. For the GAM model without daily variation accounted for, the AIC was decreased from 8412 to 8402 with precipitation included, while also adding only one degree of freedom. The AIC measurement also decreased for the GAM model with weekly variation, from 8374 to 8366, also adding only one degree of freedom. 
+
+
+
+Future Model Improvements
+
+Additional data to improve this model is data on human predictors. Research by Rolison et al (2018) lists all except one of the top 6 frequent factors identified in road accidents as those that are linked to human error; driver carelessness, lack of control, travelling too fast for conditions, inexperience and speeding. Data that is linked more closely to the human element of road accidents may be useful in predicting the number of road accidents. 
+
+Data on the number of drivers under the influence of substances which could impair their driving is the first piece of additional data that could be added. This could include a count number of drivers each day found with a blood alcohol level above the limit or to return a positive drug test as a separate datafile or an additional column in the car accident data stating if the driver was under the influence of a substance. However, including this data could compromise the privacy of individuals involved in accidents, so this is something that would need to be considered if including this data.
+
+Data stating the years of experience of drivers would also be useful. This could be collected from a separate database, e.g. data from Vic Roads with a count of how many drivers have held their licence for each number of years for each set of yearly data might be a good estimate to assist in model creation. It could also be useful to include the number of years driving experience in the car accident data. As with including substances that impair driving in car accident data, there would be a privacy consideration required prior to including number of years of driving experience.
+
+Another useful piece of data would be the number of drivers speeding. This data could be collected and recorded directly as a count per day from speed camera’s or as the number of fines given out. This data could also be an additional column on the car accident dataframe, with an additional column stating the number of accidents that day where speeding was a contributing factor. Again, there would be a privacy consideration in adding this information.
+
+
+
+Summary
+
+This analysis has not given conclusive results for which modelling method and which variables are best for modelling the number of traffic accidents. Several models were tested, including linear models and GAM models with three different distributions. Comparisons were also made with one two and three variables, as well as classifying the variable of time by day of the week.
+
+Time is an interesting variable in the prediction of total road traffic accidents. When considered as the only variable, time is a good predictor. As subsequent variables of EHF and precipitation were added, the P-value of time increased and it becomes more evident that results are due to chance, not to the date. However, when time is divided into weekday categories, and the daily variation is included in models, the weekday was a very significant variable in the prediction of the total number of road accidents.
+
+Using these results, EHF is not a strong predictor of car accidents, but is a variable of interest. All P-values for EHF were below the significance value but not by a large margin. This suggests that it by itself is not a string indicator of the number of total daily road traffic accidents. Of note, as another value was added, to the models, the P-value reported for EHF decreased, suggesting that the impact of this variable decreases as more relevant factors are included. The addition of EHF improved the AIC of every model tested, suggesting that including this variable is advantageous.
+
+When adding in the third variable of precipitation, all models were improved, as evidenced by their lower AIC measurements. It was found that precipitation is also likely to be a good predictor of the number of road accidents than EHF, as all models tested returned a significant P-value for precipitation compared to EHF and time. This also matches the research by Rolison et al (2018) which reports slippery roads as a top cause of road accidents, which is linked to precipitation.
+
+The strongest predictor of number of total road accidents is weekday. This is evidenced by the very low P-values each time this variable was included. However, it is important to note that weekday categorisation was only carried out on one type of model. It is suggested that to further investigate the effect of this variable, a greater variety of models inclusive of weekday are tested.
+
+From the modelling carried out here, it is evident that more research is required to determine the best distribution to use. No distribution was a perfect fit for the data, with residuals showing evidence of different patterns even in each of the ‘best’ models used in this investigation. The distributions used in the modelling were not exhaustive, and it is possible that other distributions that were not tested could better fit this data. To determine the best model, extensive modelling with different distributions, smoothing functions and exponent values would need to be carried out.
+
+Finally, this research did not investigate the human predictors involved in road traffic accidents. Rolison et al’s 2018 research states that the most frequent factors reported in road accidents are reflective of driver error. It is suggested that more research into human predictors is carried out, although privacy concerns would need to be addressed to achieve this.
+
+
+
